@@ -11,3 +11,4 @@ SQLAlchemy>=2.0.23
 uvicorn[standard]>=0.27.0
 pymongo>=4.6.0
 motor>=3.3.2
+pydantic[email]>=2.5.0
