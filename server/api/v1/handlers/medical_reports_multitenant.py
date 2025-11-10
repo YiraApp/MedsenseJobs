@@ -94,7 +94,7 @@ async def upload_report(
 
     ai_model_id = project.get("ai_model_id")
     if not ai_model_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Project '{project_id}' has no assigned AI model")
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Project '{project_id}' has not activeted please contact contact@yira.ai")
 
     ai_model = await ai_models_collection.find_one({"model_id": ai_model_id, "tenant_id": tenant_id})
     if not ai_model:
