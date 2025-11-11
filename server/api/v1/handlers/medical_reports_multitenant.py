@@ -11,6 +11,7 @@ import io
 import logging
 import zipfile
 from typing import List, Optional
+import asyncio
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from bson import ObjectId
@@ -217,7 +218,7 @@ async def upload_report(
             "created_at": time.time(),
         })
         if background_tasks:
-            background_tasks.add_task(do_parsing_and_save, update_record=True)
+            asyncio.create_task(do_parsing_and_save(update_record=True))
         return {"success": True, "report_id": report_id, "status": "pending", "message": "Parsing queued"}
 
     # For sync: Do parsing synchronously, then return data
