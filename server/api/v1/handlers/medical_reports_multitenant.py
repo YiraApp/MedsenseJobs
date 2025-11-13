@@ -27,6 +27,7 @@ from server.middleware.auth import (
 from server.models.tenant import tenant_manager
 from server.utils.usage_tracker import usage_tracker
 from server.utils.confidence_calculator import calculate_confidence
+from server.utils.analytics_tracker import analytics_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -69,163 +70,6 @@ class ReportStatus(BaseModel):
     status: str  # "pending", "completed", "failed"
     message: Optional[str] = None
     parsed_data: Optional[dict] = None
-
-@router.post(
-    "aync/tenants/{tenant_id}/projects/{project_id}/reports",
-    summary="Upload medical report(s) for project",
-    description="Upload one or more PDF medical reports for a specific project. Files are parsed using the project's assigned AI model.",
-)
-async def upload_report(
-    tenant_id: str,
-    project_id: str,
-    file: List[UploadFile] = File(..., description="PDF medical report(s) or ZIP file containing PDFs"),
-    waitForParsedResponse: bool = Query(True, description="Wait for parsing (synchronous) or queue and poll by reportId"),
-    background_tasks: BackgroundTasks = None,
-    auth: AuthenticatedTenant = Depends(resolve_tenant),
-):
-    db = await MongoDBClient.get_database()
-    projects_collection = db["projects"]
-    ai_models_collection = db["ai_models"]
-    parsed_reports_collection = db["parsed_reports"]
-
-    # Verify project
-    project = await projects_collection.find_one({"project_id": project_id, "tenant_id": tenant_id})
-    if not project:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Project '{project_id}' not found for tenant '{tenant_id}'")
-
-    ai_model_id = project.get("ai_model_id")
-    if not ai_model_id:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Project '{project_id}' has not activeted please contact contact@yira.ai")
-
-    ai_model = await ai_models_collection.find_one({"model_id": ai_model_id, "tenant_id": tenant_id})
-    if not ai_model:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"AI model '{ai_model_id}' not found")
-
-    settings = get_settings()
-    selected_model = ai_model.get("model_name")
-    print("Using Gemini model:", selected_model)
-    gemini_client = GeminiParser(api_key=settings.gemini_api_key, model=selected_model)
-
-    # File handling (same as before)
-    pdf_files = []
-    total_size_mb = 0.0
-    for uploaded_file in file:
-        file_bytes = await uploaded_file.read()
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        total_size_mb += file_size_mb
-        is_zip = (uploaded_file.filename and uploaded_file.filename.lower().endswith('.zip')) or (
-            uploaded_file.content_type and 'zip' in uploaded_file.content_type.lower()
-        )
-        if is_zip:
-            try:
-                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zip_ref:
-                    for zip_info in zip_ref.namelist():
-                        if '__MACOSX' in zip_info or zip_info.endswith('/'):
-                            continue
-                        if zip_info.lower().endswith('.pdf'):
-                            pdf_bytes = zip_ref.read(zip_info)
-                            pdf_size_mb = len(pdf_bytes) / (1024 * 1024)
-                            pdf_files.append({'filename': zip_info, 'bytes': pdf_bytes, 'size_mb': pdf_size_mb})
-            except zipfile.BadZipFile:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"File '{uploaded_file.filename}' is not a valid ZIP file.")
-        else:
-            if uploaded_file.content_type and uploaded_file.content_type.lower() != "application/pdf":
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Only PDF and ZIP files are supported. Got: {uploaded_file.content_type}")
-            pdf_files.append({'filename': uploaded_file.filename or 'document.pdf', 'bytes': file_bytes, 'size_mb': file_size_mb})
-
-    if not pdf_files:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No PDF files found in the uploaded file(s).")
-
-    # Generate unique reportId
-    report_object_id = ObjectId()
-    report_id = str(report_object_id)
-    usage_tracker.track_upload(tenant_id, total_size_mb)
-
-    async def do_parsing_and_save(update_record=False):
-        parse_start_time = time.time()
-        consolidated_data = None
-        parsed_results = []
-        # Parse files (same as before)
-        if len(pdf_files) > 1:
-            try:
-                consolidated_data = gemini_client.parse_multiple_pdfs(pdf_files)
-                if consolidated_data:
-                    parsed_results = [{'filename': pdf['filename'], 'data': consolidated_data} for pdf in pdf_files]
-            except Exception as exc:
-                consolidated_data = None
-        if not consolidated_data:
-            parsed_results = []
-            for pdf_file in pdf_files:
-                try:
-                    parsed_data = gemini_client.parse_pdf(pdf_file['bytes'], pdf_file['filename'])
-                    if parsed_data:
-                        parsed_results.append({'filename': pdf_file['filename'], 'data': parsed_data})
-                except Exception as exc:
-                    continue
-            if not parsed_results:
-                await parsed_reports_collection.update_one(
-                    {"report_id": report_id},
-                    {"$set": {"status": "failed", "message": "Failed to parse any of the uploaded PDF files."}}
-                )
-                return
-            consolidated_data = _merge_parsed_reports(parsed_results)
-        parse_end_time = time.time()
-        parsing_time_seconds = round(parse_end_time - parse_start_time, 2)
-        first_file = file[0]
-        blob_url = None
-
-        clean_parsed_data = consolidated_data.copy() if isinstance(consolidated_data, dict) else {}
-        gemini_confidence = clean_parsed_data.pop("confidence_score", None)
-        gemini_confidence_summary = clean_parsed_data.pop("confidence_summary", None)
-        validated_confidence, validated_summary, validation_details = calculate_confidence(
-            parsed_data=clean_parsed_data or consolidated_data,
-            gemini_confidence=gemini_confidence
-        )
-        parsed_report_doc = {
-            "tenant_id": tenant_id,
-            "project_id": project_id,
-            "report_id": report_id,
-            "blob_url": blob_url,
-            "parsing_time_seconds": parsing_time_seconds,
-            "confidence_score": validated_confidence,
-            "confidence_summary": validated_summary,
-            "total_size_mb": round(total_size_mb, 2),
-            "files_processed": len(pdf_files),
-            "successful_parses": len(parsed_results),
-            "failed_parses": len(pdf_files) - len(parsed_results),
-            "parsed_data": clean_parsed_data or consolidated_data,
-            "status": "completed",
-            "message": f"Successfully processed {len(parsed_results)} of {len(pdf_files)} PDF file(s) in {parsing_time_seconds}s.",
-            "created_at": time.time(),
-        }
-        if update_record:
-            await parsed_reports_collection.update_one(
-                {"report_id": report_id},
-                {"$set": parsed_report_doc}
-            )
-        else:
-            await parsed_reports_collection.insert_one(parsed_report_doc)
-
-
-    # For async: Immediately persist with status "pending", then queue parsing
-    if not waitForParsedResponse:
-        await parsed_reports_collection.insert_one({
-            "tenant_id": tenant_id,
-            "project_id": project_id,
-            "report_id": report_id,
-            "status": "pending",
-            "message": "Parsing queued",
-            "created_at": time.time(),
-        })
-        if background_tasks:
-            asyncio.create_task(do_parsing_and_save(update_record=True))
-        return {"success": True, "report_id": report_id, "status": "pending", "message": "Parsing queued"}
-
-    # For sync: Do parsing synchronously, then return data
-    await do_parsing_and_save(update_record=False)
-    doc = await parsed_reports_collection.find_one({"report_id": report_id})
-    return _serialize_mongodb_doc(doc) if doc else {"success": False, "report_id": report_id, "status": "failed", "message": "Parsing failed"}
-
 
 
 @router.post(
@@ -516,6 +360,62 @@ async def upload_report(
                 logger.info("Parsed report stored in DB for report_id: %s", report_id)
             except Exception as db_exc:
                 logger.warning("Failed to store parsed report in DB: %s", db_exc)
+
+            # Track analytics for this parsing event
+            try:
+                logger.info("🔍 Starting analytics tracking for report %s...", report_id)
+                
+                # Count total pages from parsed data (if available)
+                pages_processed = 1  # Default to 1 page
+                if parsed_report_doc.get("parsed_data"):
+                    # Try to extract page count from parsed data if available
+                    parsed_data = parsed_report_doc["parsed_data"]
+                    if isinstance(parsed_data, dict) and "total_pages" in parsed_data:
+                        pages_processed = int(parsed_data.get("total_pages", 1))
+                
+                logger.info(f"📄 Pages to track: {pages_processed}")
+                
+                # Get AI model cost per page
+                cost_per_page = ai_model.get("cost_per_page", 0.0)
+                logger.info(f"💰 Cost per page: ${cost_per_page}")
+                
+                logger.info(f"📊 Calling analytics_tracker.track_report_parse() with:")
+                logger.info(f"   - tenant_id: {tenant_id}")
+                logger.info(f"   - project_id: {project_id}")
+                logger.info(f"   - pages_processed: {pages_processed}")
+                logger.info(f"   - parsing_time_seconds: {parsing_time_seconds}")
+                logger.info(f"   - cost_per_page: {cost_per_page}")
+                
+                # Track the analytics event
+                track_result = await analytics_tracker.track_report_parse(
+                    tenant_id=tenant_id,
+                    project_id=project_id,
+                    pages_processed=pages_processed,
+                    parsing_time_seconds=parsing_time_seconds,
+                    cost_per_page=cost_per_page,
+                    success=True,
+                )
+                
+                if track_result:
+                    logger.info("✅ Analytics tracked successfully for report %s", report_id)
+                else:
+                    logger.warning("⚠️  Analytics tracking returned False for report %s", report_id)
+                
+                # Sync aggregated analytics to ProjectAnalytics and TenantAnalytics collections
+                try:
+                    logger.info("🔄 Syncing ProjectAnalytics and TenantAnalytics...")
+                    await analytics_tracker.sync_project_analytics(tenant_id, project_id)
+                    await analytics_tracker.sync_tenant_analytics(tenant_id)
+                    logger.info("✅ Analytics synced to ProjectAnalytics and TenantAnalytics collections")
+                except Exception as sync_exc:
+                    logger.warning("⚠️  Failed to sync analytics collections: %s", sync_exc)
+                    logger.exception("Sync exception details:")
+                    # Don't fail the request if sync fails
+                    
+            except Exception as analytics_exc:
+                logger.warning("❌ Failed to track analytics for report %s: %s", report_id, analytics_exc)
+                logger.exception("Analytics exception details:")
+                # Don't fail the request if analytics tracking fails
 
             return parsed_report_doc
         except HTTPException:
