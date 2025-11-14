@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class GeminiParser:
     """Thin wrapper around the Google Gemini SDK."""
-
+    
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         if not api_key:
             raise ValueError("GEMINI_API_KEY must be configured before using GeminiParser.")
@@ -146,7 +146,31 @@ class GeminiParser:
                 logger.error("Gemini returned empty text for PDF '%s'.", filename)
                 return None
 
-            return self._extract_json(response.text)
+            parsed_json = self._extract_json(response.text)
+            if not parsed_json:
+                return None
+
+            # Attach usage + cost (metadata preferred, fallback to file-size estimate)
+            try:
+                inp, out = self._extract_token_usage(response)
+                if inp == 0 and out == 0 and tmp_path and os.path.exists(tmp_path):
+                    # heuristic estimate: ~4 tokens per KB split 30/70 in/out
+                    file_kb = os.path.getsize(tmp_path) / 1024.0
+                    est_tokens = max(1, int(file_kb * 4))
+                    inp = int(est_tokens * 0.3)
+                    out = est_tokens - inp
+                cost = self._compute_cost(inp, out)
+                parsed_json["usage"] = {
+                    "model": self.model_name,
+                    "input_tokens": int(inp),
+                    "output_tokens": int(out),
+                    "cost_usd": float(cost),
+                }
+            except Exception:
+                # don't fail parsing if usage extraction fails
+                logger.debug("Failed to extract usage/cost for '%s'", filename, exc_info=True)
+
+            return parsed_json
         except Exception as exc:
             logger.exception("Gemini failed to parse PDF '%s'.", filename)
             raise RuntimeError("Gemini PDF parsing failed") from exc
@@ -208,27 +232,38 @@ class GeminiParser:
                 return None
             
             parsed_data = self._extract_json(response.text)
-            
-            # Add batch metadata - wrap in dict if needed
-            if parsed_data:
-                # If parsed_data is a dict, add batch_info to it
+            if not parsed_data:
+                return None
+
+            # Attach usage + cost for batch results (metadata-first, fallback to size)
+            try:
+                inp, out = self._extract_token_usage(response)
+                if inp == 0 and out == 0 and tmp_paths:
+                    total_kb = sum(os.path.getsize(p) for p in tmp_paths) / 1024.0
+                    est_tokens = max(1, int(total_kb * 4))
+                    inp = int(est_tokens * 0.3)
+                    out = est_tokens - inp
+                cost = self._compute_cost(inp, out)
                 if isinstance(parsed_data, dict):
-                    parsed_data['batch_info'] = {
-                        'is_batch_report': True,
-                        'total_files': len(pdf_files),
-                        'source_files': filenames,
+                    parsed_data["usage"] = {
+                        "model": self.model_name,
+                        "input_tokens": int(inp),
+                        "output_tokens": int(out),
+                        "cost_usd": float(cost),
                     }
-                # If parsed_data is something else (list, etc.), wrap it
                 else:
                     parsed_data = {
-                        'data': parsed_data,
-                        'batch_info': {
-                            'is_batch_report': True,
-                            'total_files': len(pdf_files),
-                            'source_files': filenames,
-                        }
+                        "data": parsed_data,
+                        "usage": {
+                            "model": self.model_name,
+                            "input_tokens": int(inp),
+                            "output_tokens": int(out),
+                            "cost_usd": float(cost),
+                        },
                     }
-            
+            except Exception:
+                logger.debug("Failed to extract batch usage/cost", exc_info=True)
+
             return parsed_data
             
         except Exception as exc:
@@ -389,3 +424,32 @@ class GeminiParser:
             "\n"
             "Only include fields that are present in the source document."
         )
+    # ---- Added: token extraction + cost helper (metadata-first, file-size fallback) ----
+    @staticmethod
+    def _extract_token_usage(response) -> tuple[int, int]:
+        """Try common shapes in SDK raw response to extract input/output token counts."""
+        try:
+            raw = getattr(response, "_raw_response", None) or getattr(response, "usage_metadata", None)
+            # dict-like raw
+            if isinstance(raw, dict):
+                usage = raw.get("usage") or raw.get("usage_metadata") or raw
+                if isinstance(usage, dict):
+                    inp = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+                    out = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+                    return inp, out
+            # attribute-style raw
+            if raw:
+                inp = int(getattr(raw, "prompt_token_count", 0) or 0)
+                out = int(getattr(raw, "candidates_token_count", 0) or 0)
+                return inp, out
+        except Exception:
+            pass
+        return 0, 0
+
+    @staticmethod
+    def _compute_cost(input_tokens: int, output_tokens: int) -> float:
+        """Compute USD cost using your requested formula."""
+        input_cost = (input_tokens / 1_000_000) * 0.30
+        output_cost = (output_tokens / 1_000_000) * 2.50
+        return round(input_cost + output_cost, 6)
+    # ---- end helpers ----
