@@ -32,6 +32,34 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Medical Reports"])
 
+# --- ADDED: token extraction and simple cost calculation helpers ---
+def _extract_tokens_from_parsed(parsed: dict) -> tuple[int, int]:
+    """Extract input/output token counts from parsed payload."""
+    if not parsed or not isinstance(parsed, dict):
+        return 0, 0
+    usage = parsed.get("usage") or parsed.get("usage_stats") or parsed.get("token_usage")
+    if isinstance(usage, dict):
+        inp = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        out = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        return inp, out
+    inp = int(parsed.get("input_tokens") or parsed.get("prompt_tokens") or 0)
+    out = int(parsed.get("output_tokens") or parsed.get("completion_tokens") or 0)
+    return inp, out
+
+
+def _compute_token_cost(input_tokens: int, output_tokens: int) -> float:
+    """
+    Compute cost:
+      input_cost = (input_tokens / 1_000_000) * 0.30
+      output_cost = (output_tokens / 1_000_000) * 2.50
+    Returns total_cost_usd rounded to 6 decimals.
+    """
+    input_cost = (input_tokens / 1_000_000) * 0.30
+    output_cost = (output_tokens / 1_000_000) * 2.50
+    total = input_cost + output_cost
+    return round(total, 6)
+# --- END ADDED ---
+
 
 def _get_gemini_client() -> GeminiParser:
     """Return a cached Gemini client instance."""
@@ -181,23 +209,38 @@ async def upload_report(
             parsed_data=clean_parsed_data or consolidated_data,
             gemini_confidence=gemini_confidence
         )
+
+        # --- ensure token / cost variables exist (avoid NameError) ---
+        input_tokens, output_tokens = _extract_tokens_from_parsed(clean_parsed_data or consolidated_data)
+        cost = _compute_token_cost(input_tokens, output_tokens)
+        # --- end ---
+
         parsed_report_doc = {
-            "tenant_id": tenant_id,
-            "project_id": project_id,
-            "report_id": report_id,
-            "blob_url": blob_url,
-            "parsing_time_seconds": parsing_time_seconds,
-            "confidence_score": validated_confidence,
-            "confidence_summary": validated_summary,
-            "total_size_mb": round(total_size_mb, 2),
-            "files_processed": len(pdf_files),
-            "successful_parses": len(parsed_results),
-            "failed_parses": len(pdf_files) - len(parsed_results),
-            "parsed_data": clean_parsed_data or consolidated_data,
-            "status": "completed",
-            "message": f"Successfully processed {len(parsed_results)} of {len(pdf_files)} PDF file(s) in {parsing_time_seconds}s.",
-            "created_at": time.time(),
-        }
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "report_id": report_id,
+                    "blob_url": blob_url,
+                    "parsing_time_seconds": parsing_time_seconds,
+                    "confidence_score": validated_confidence,
+                    "confidence_summary": validated_summary,
+                    "total_size_mb": round(total_size_mb, 2),
+                    "files_processed": len(pdf_files),
+                    "successful_parses": len(parsed_results),
+                    "failed_parses": len(pdf_files) - len(parsed_results),
+                    "parsed_data": clean_parsed_data or consolidated_data,
+
+
+                    "usage": {
+                        "model": selected_model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_usd": cost,
+                    },
+
+                    "cost_usd": cost,
+                    "created_at": time.time(),
+                }
+
         if update_record:
             await parsed_reports_collection.update_one(
                 {"report_id": report_id},
@@ -449,7 +492,7 @@ async def upload_report(
 
             usage_tracker.track_upload(tenant_id, total_size_mb)
 
-            # Split confidence information from the parsed payload
+            # Split confidence information from the parsed payload so we can surface it cleanly
             clean_parsed_data = consolidated_data.copy() if isinstance(consolidated_data, dict) else {}
             gemini_confidence = None
             gemini_confidence_summary = None
@@ -464,6 +507,12 @@ async def upload_report(
                 gemini_confidence=gemini_confidence
             )
             logger.info("✅ Validated Confidence: %d/100 - %s", validated_confidence, validated_summary)
+            logger.info("   Gemini Self-Assessment: %s", gemini_confidence or "N/A")
+
+            # --- ensure token / cost variables exist (avoid NameError) ---
+            input_tokens, output_tokens = _extract_tokens_from_parsed(clean_parsed_data or consolidated_data)
+            cost = _compute_token_cost(input_tokens, output_tokens)
+            # --- end ---
 
             # response_data = {
             #     "success": True,
@@ -495,22 +544,33 @@ async def upload_report(
                 if not report_id:
                     report_object_id = ObjectId()
                     report_id = str(report_object_id)
-
                 parsed_report_doc = {
-                    "tenant_id": tenant_id,
-                    "project_id": project_id,
-                    "report_id": report_id,  # <-- always unique ObjectId string
-                    "blob_url": blob_url,
-                    "parsing_time_seconds": parsing_time_seconds,
-                    "confidence_score": validated_confidence,
-                    "confidence_summary": validated_summary,
-                    "total_size_mb": round(total_size_mb, 2),
-                    "files_processed": len(pdf_files),
-                    "successful_parses": len(parsed_results),
-                    "failed_parses": len(pdf_files) - len(parsed_results),
-                    "parsed_data": clean_parsed_data or consolidated_data,
-                    "created_at": time.time(),
-                }
+                                "tenant_id": tenant_id,
+                                "project_id": project_id,
+                                "report_id": report_id,
+                                "blob_url": blob_url,
+                                "parsing_time_seconds": parsing_time_seconds,
+                                "confidence_score": validated_confidence,
+                                "confidence_summary": validated_summary,
+                                "total_size_mb": round(total_size_mb, 2),
+                                "files_processed": len(pdf_files),
+                                "successful_parses": len(parsed_results),
+                                "failed_parses": len(pdf_files) - len(parsed_results),
+                                "parsed_data": clean_parsed_data or consolidated_data,
+
+                                # ⭐ NEW ⭐
+                                "usage": {
+                                    "model": selected_model,
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "cost_usd": cost,
+                                },
+
+                                "cost_usd": cost,
+                                "created_at": time.time(),
+                            }
+
+
                 result = await parsed_reports_collection.insert_one(parsed_report_doc)
                 parsed_report_doc["_id"] = str(result.inserted_id)
                 logger.info("Parsed report stored in DB for report_id: %s", report_id)
@@ -749,6 +809,11 @@ async def upload_report_legacy(
         logger.info("✅ Validated Confidence: %d/100 - %s", validated_confidence, validated_summary)
         logger.info("   Gemini Self-Assessment: %s", gemini_confidence or "N/A")
 
+        # --- ensure token / cost variables exist (avoid NameError) ---
+        input_tokens, output_tokens = _extract_tokens_from_parsed(clean_parsed_data or consolidated_data)
+        cost = _compute_token_cost(input_tokens, output_tokens)
+        # --- end ---
+
         # response_data = {
         #     "success": True,
         #     "parsing_time_seconds": parsing_time_seconds,
@@ -768,22 +833,32 @@ async def upload_report_legacy(
             if not report_id:
                 report_object_id = ObjectId()
                 report_id = str(report_object_id)
-
             parsed_report_doc = {
-                "tenant_id": tenant_id,
-                "project_id": None,
-                "report_id": report_id,  # <-- always unique ObjectId string
-                "blob_url": blob_url,
-                "parsing_time_seconds": parsing_time_seconds,
-                "confidence_score": validated_confidence,
-                "confidence_summary": validated_summary,
-                "total_size_mb": round(total_size_mb, 2),
-                "files_processed": len(pdf_files),
-                "successful_parses": len(parsed_results),
-                "failed_parses": len(pdf_files) - len(parsed_results),
-                "parsed_data": clean_parsed_data or consolidated_data,
-                "created_at": time.time(),
-            }
+                    "tenant_id": tenant_id,
+                    "project_id": project_id,
+                    "report_id": report_id,
+                    "blob_url": blob_url,
+                    "parsing_time_seconds": parsing_time_seconds,
+                    "confidence_score": validated_confidence,
+                    "confidence_summary": validated_summary,
+                    "total_size_mb": round(total_size_mb, 2),
+                    "files_processed": len(pdf_files),
+                    "successful_parses": len(parsed_results),
+                    "failed_parses": len(pdf_files) - len(parsed_results),
+                    "parsed_data": clean_parsed_data or consolidated_data,
+
+                    # ⭐ NEW ⭐
+                    "usage": {
+                        "model": selected_model,
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cost_usd": cost,
+                    },
+
+                    "cost_usd": cost,
+                    "created_at": time.time(),
+                }
+
             result = await parsed_reports_collection.insert_one(parsed_report_doc)
             parsed_report_doc["_id"] = str(result.inserted_id)
             logger.info("Parsed report stored in DB for report_id: %s", report_id)
