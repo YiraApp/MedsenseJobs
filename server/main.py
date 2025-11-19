@@ -9,12 +9,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
+from fastapi import Request
+from fastapi.responses import Response
+from datetime import datetime
 
 from server.config.settings import get_settings
 from server.core.exceptions import APIException
 from server.core.logging_config import configure_logging
 from server.integrations.mongodb import MongoDBClient
 from server.workers.parsing_worker import get_parsing_worker
+from server.api.v1.handlers.log_repository import LogRepository
 
 
 # Configure logging
@@ -87,6 +91,54 @@ def create_app() -> FastAPI:
         version=settings.app_version,
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def log_request_response(request: Request, call_next):
+        start_time = datetime.utcnow()
+
+        # Read request body
+        try:
+            request_body = await request.body()
+        except Exception:
+            request_body = b""
+
+        # Process request and capture response
+        response = await call_next(request)
+
+        # Clone or read response body
+        response_body = b""
+        async for chunk in response.body_iterator:
+            response_body += chunk
+
+        # Rebuild response object since ASGI only consumes body once
+        response = Response(
+            content=response_body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+
+        # Compute processing time
+        process_time = (datetime.utcnow() - start_time).total_seconds()
+
+        # Log to MongoDB or Console (via configured logger)
+        log_data = {
+        "method": request.method,
+        "path": request.url.path,
+        "query": str(request.query_params),
+        "request_body": request_body.decode("utf-8", errors="ignore")[:10000],
+        "status": response.status_code,
+        "response_body": response_body.decode("utf-8", errors="ignore")[:10000],
+        "process_time": (datetime.utcnow() - start_time).total_seconds(),
+        "timestamp": start_time,
+        }
+
+        try:
+          await LogRepository.insert_log(log_data)
+        except Exception as e:
+          logger.error(f"Failed to store logs in MongoDB: {e}")
+
+        return response
 
     # Add CORS middleware
     app.add_middleware(
