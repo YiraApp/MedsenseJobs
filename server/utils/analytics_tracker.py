@@ -206,12 +206,14 @@ class AnalyticsTracker:
                 all_project_success_rates.extend(proj_rates)
             
             tenant_avg_success_rate = sum(all_project_success_rates) / len(all_project_success_rates) if all_project_success_rates else 100.0
+            total_active_projects = len(all_projects)
             
             tenant_update = {
                 "$inc": {
                     "total_uploads": 1,  # One upload session
                 },
                 "$set": {
+                    "total_projects": total_active_projects,
                     "average_success_rate": round(tenant_avg_success_rate, 2),
                     "last_updated": datetime.utcnow(),
                 }
