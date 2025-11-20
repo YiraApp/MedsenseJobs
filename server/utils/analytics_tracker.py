@@ -116,15 +116,15 @@ class AnalyticsTracker:
             project_analytics_collection = db["ProjectAnalytics"]
             tenant_analytics_collection = db["TenantAnalytics"]
             
-            # Calculate batch metrics
-            total_pages = sum(r.get('pages', 1) for r in parsed_results)
-            avg_parse_time = sum(r.get('parse_time', 0) for r in parsed_results) / len(parsed_results) if parsed_results else 0
-            avg_success_rate = sum(r.get('success_rate', 100.0) for r in parsed_results) / len(parsed_results) if parsed_results else 100.0
-            
-            # Extract per-document metrics
+            # Extract per-document metrics for this batch
             pages_list = [r.get('pages', 1) for r in parsed_results]
             parse_times_list = [r.get('parse_time', 0) for r in parsed_results]
             success_rates_list = [r.get('success_rate', 100.0) for r in parsed_results]
+            
+            # Calculate batch metrics
+            total_pages = sum(pages_list)
+            avg_parse_time_current_batch = sum(parse_times_list) / len(parse_times_list) if parse_times_list else 0
+            avg_success_rate_current_batch = sum(success_rates_list) / len(success_rates_list) if success_rates_list else 100.0
             
             # ✅ WRITE 1: Insert analytics events (audit trail - one per PDF)
             analytics_docs = [
@@ -144,7 +144,7 @@ class AnalyticsTracker:
                 await analytics_collection.insert_many(analytics_docs)
                 logger.info(f"✅ Inserted {len(analytics_docs)} audit trail documents")
             
-            # ✅ WRITE 2: Update ProjectAnalytics (APPEND arrays, no read needed)
+            # ✅ WRITE 2: Update ProjectAnalytics (APPEND arrays, then recalculate averages)
             project_update = {
                 "$inc": {
                     "total_uploads": 1,  # One upload session
@@ -155,13 +155,35 @@ class AnalyticsTracker:
                     "parse_times": {"$each": parse_times_list},
                     "success_rates": {"$each": success_rates_list},
                 },
-                "$set": {
-                    "project_name": project_name,
-                    "avg_parse_time_seconds": avg_parse_time,
-                    "avg_parse_time_per_doc_seconds": avg_parse_time,
-                    "average_success_rate": avg_success_rate,
-                    "last_updated": datetime.utcnow(),
-                }
+            }
+            
+            # After updating arrays, recalculate overall averages from ALL historical data
+            # Get current document to calculate new averages including this batch
+            current_project = await project_analytics_collection.find_one({
+                "project_id": project_id,
+                "tenant_id": tenant_id,
+            })
+            
+            if current_project:
+                # Calculate averages from existing arrays + new values
+                all_parse_times = current_project.get('parse_times', []) + parse_times_list
+                all_success_rates = current_project.get('success_rates', []) + success_rates_list
+            else:
+                # First update, just use current batch
+                all_parse_times = parse_times_list
+                all_success_rates = success_rates_list
+            
+            # Calculate overall averages
+            overall_avg_parse_time = sum(all_parse_times) / len(all_parse_times) if all_parse_times else 0
+            overall_avg_success_rate = sum(all_success_rates) / len(all_success_rates) if all_success_rates else 100.0
+            
+            # Add the calculated averages to the update
+            project_update["$set"] = {
+                "project_name": project_name,
+                "avg_parse_time_seconds": round(overall_avg_parse_time, 2),
+                "avg_parse_time_per_doc_seconds": round(overall_avg_parse_time, 2),
+                "average_success_rate": round(overall_avg_success_rate, 2),
+                "last_updated": datetime.utcnow(),
             }
             
             await project_analytics_collection.update_one(
@@ -171,12 +193,26 @@ class AnalyticsTracker:
             )
             logger.info(f"✅ Updated ProjectAnalytics for {project_id}")
             
-            # ✅ WRITE 3: Update TenantAnalytics (no read needed)
+            # ✅ WRITE 3: Update TenantAnalytics (recalculate average_success_rate from all projects)
+            # Get all projects for this tenant to calculate tenant-level average success rate
+            all_projects = await project_analytics_collection.find({
+                "tenant_id": tenant_id,
+            }).to_list(None)
+            
+            # Calculate tenant-level average success rate from all projects
+            all_project_success_rates = []
+            for proj in all_projects:
+                proj_rates = proj.get('success_rates', [])
+                all_project_success_rates.extend(proj_rates)
+            
+            tenant_avg_success_rate = sum(all_project_success_rates) / len(all_project_success_rates) if all_project_success_rates else 100.0
+            
             tenant_update = {
                 "$inc": {
                     "total_uploads": 1,  # One upload session
                 },
                 "$set": {
+                    "average_success_rate": round(tenant_avg_success_rate, 2),
                     "last_updated": datetime.utcnow(),
                 }
             }

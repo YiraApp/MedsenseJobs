@@ -240,6 +240,7 @@ async def upload_report(
                                 'data': consolidated_data,
                                 'pages': pages_per_pdf,
                                 'parse_time': time_per_pdf,
+                                'success_rate': 100.0,
                             }
                             for pdf in pdf_files
                         ]
@@ -264,6 +265,7 @@ async def upload_report(
                                 'data': parsed_data,
                                 'pages': pages_in_pdf,
                                 'parse_time': pdf_parse_time,
+                                'success_rate': 100.0,
                             })
                     except Exception as exc:
                         logger.warning("Failed to parse PDF '%s': %s", pdf_file['filename'], exc)
