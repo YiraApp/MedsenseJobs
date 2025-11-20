@@ -199,11 +199,13 @@ class AnalyticsTracker:
                 "tenant_id": tenant_id,
             }).to_list(None)
             
-            # Calculate tenant-level average success rate from all projects
+            # Calculate tenant-level average success rate and total pages from all projects
             all_project_success_rates = []
+            total_tenant_pages = 0
             for proj in all_projects:
                 proj_rates = proj.get('success_rates', [])
                 all_project_success_rates.extend(proj_rates)
+                total_tenant_pages += proj.get('total_pages', 0)
             
             tenant_avg_success_rate = sum(all_project_success_rates) / len(all_project_success_rates) if all_project_success_rates else 100.0
             total_active_projects = len(all_projects)
@@ -214,6 +216,7 @@ class AnalyticsTracker:
                 },
                 "$set": {
                     "total_projects": total_active_projects,
+                    "total_pages": total_tenant_pages,
                     "average_success_rate": round(tenant_avg_success_rate, 2),
                     "last_updated": datetime.utcnow(),
                 }
@@ -323,6 +326,7 @@ class AnalyticsTracker:
                     "tenant_id": tenant_id,
                     "total_projects": total_projects,
                     "total_uploads": tenant_doc.get("total_uploads", 0),
+                    "total_pages": tenant_doc.get("total_pages", 0),
                     "average_success_rate": round(tenant_doc.get("average_success_rate", 100.0), 2),
                 }
             else:
@@ -330,6 +334,7 @@ class AnalyticsTracker:
                     "tenant_id": tenant_id,
                     "total_projects": total_projects,
                     "total_uploads": 0,
+                    "total_pages": 0,
                     "average_success_rate": 100.0,
                 }
             

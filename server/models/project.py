@@ -83,6 +83,7 @@ class TenantAnalytics(BaseModel):
     tenant_id: str = Field(..., description="Tenant ID")
     total_projects: int = Field(default=0, description="Total number of projects")
     total_uploads: int = Field(default=0, description="Total uploads across all projects")
+    total_pages: int = Field(default=0, description="Total pages across all projects")
     average_success_rate: float = Field(default=100.0, description="Average success rate across all projects")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     last_updated: datetime = Field(default_factory=datetime.utcnow)
