@@ -414,9 +414,9 @@ class ParsingWorker:
             
             async with httpx.AsyncClient(timeout=self.WEBHOOK_TIMEOUT_SECONDS) as client:
                 response = await client.post(webhook_url, json=payload)
-                logger.info("Response status: %s", response.status_code)
-                logger.info("Response headers: %s", response.headers)
-                logger.info("Response body: %s", response.text)
+                logger.warning("Response status: %s", response.status_code)
+                logger.warning("Response headers: %s", response.headers)
+                logger.warning("Response body: %s", response.text)
 
                 if response.status_code >= 200 and response.status_code < 300:
                     logger.info("Webhook delivered successfully to %s (status: %d)", 
