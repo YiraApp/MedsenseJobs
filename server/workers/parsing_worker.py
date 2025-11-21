@@ -17,8 +17,6 @@ from server.integrations.gemini import GeminiParser
 from server.config.settings import get_settings
 from server.models.parsing_job import JobStatus, ParsingJob, BlobFileInfo
 from server.utils.confidence_calculator import calculate_confidence
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
-
 
 logger = logging.getLogger(__name__)
 
