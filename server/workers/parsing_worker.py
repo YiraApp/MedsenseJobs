@@ -433,6 +433,9 @@ class ParsingWorker:
                 else:
                     logger.warning("Webhook delivery failed to %s (status: %d)", 
                                   webhook_url, response.status_code)
+                    logger.warning("Webhook delivery failed to %s (status: %d)", 
+                                  webhook_url, response)
+
                     
                     await jobs_collection.update_one(
                         {"_id": ObjectId(job_id)},
