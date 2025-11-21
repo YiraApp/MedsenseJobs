@@ -409,8 +409,8 @@ class ParsingWorker:
                 if job and job.get("last_error"):
                     payload["error"] = job["last_error"]
             
-            logger.info("Sending webhook to %s for job %s (status: %s)", 
-                       webhook_url, job_id, status)
+            logger.warning("Sending Payload", 
+                       payload)
             
             async with httpx.AsyncClient(timeout=self.WEBHOOK_TIMEOUT_SECONDS) as client:
                 response = await client.post(webhook_url, json=payload)
