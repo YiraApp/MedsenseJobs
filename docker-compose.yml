@@ -3,7 +3,7 @@ version: '3.8'
 services:
   medical-parser-api:
     build: .
-    container_name: medical-parser-api-V2
+    container_name: MedSenseJobs
     ports:
       - "8093:8093"
     environment:
