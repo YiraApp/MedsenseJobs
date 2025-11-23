@@ -32,18 +32,15 @@ async def lifespan(app: FastAPI):
         logger.info("MongoDB connection established")
     except Exception as e:
         logger.warning(f"MongoDB connection warning: {e}")
-    
-    # Start background parsing worker
-    # DISABLED: Worker is not running for now
-    # try:
-    #     worker = get_parsing_worker()
-    #     worker_task = asyncio.create_task(worker.start())
-    #     logger.info("Parsing worker started")
-    #     app.state.worker_task = worker_task
-    #     app.state.worker = worker
-    # except Exception as e:
-    #     logger.error(f"Failed to start parsing worker: {e}")
-    
+    try:
+        worker = get_parsing_worker()
+        worker_task = asyncio.create_task(worker.start())
+        logger.info("Parsing worker started")
+        app.state.worker_task = worker_task
+        app.state.worker = worker
+    except Exception as e:
+        logger.error(f"Failed to start parsing worker: {e}")
+
     yield
     
     # Cleanup on shutdown
