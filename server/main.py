@@ -4,6 +4,7 @@ Main entry point for Medical Report Parser API
 """
 
 import logging
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -13,6 +14,7 @@ from server.config.settings import get_settings
 from server.core.exceptions import APIException
 from server.core.logging_config import configure_logging
 from server.integrations.mongodb import MongoDBClient
+from server.workers.parsing_worker import get_parsing_worker
 
 
 # Configure logging
@@ -23,6 +25,7 @@ logger = configure_logging()
 async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     logger.info("Medical Report Parser API starting...")
+    
     # Initialize MongoDB on startup
     try:
         await MongoDBClient.get_database()
@@ -30,10 +33,42 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"MongoDB connection warning: {e}")
     
+    # Start background parsing worker
+    # DISABLED: Worker is not running for now
+    try:
+        worker = get_parsing_worker()
+        worker_task = asyncio.create_task(worker.start())
+        logger.info("Parsing worker started")
+        app.state.worker_task = worker_task
+        app.state.worker = worker
+    except Exception as e:
+        logger.error(f"Failed to start parsing worker: {e}")
+    
     yield
     
     # Cleanup on shutdown
     logger.info("Medical Report Parser API shutting down...")
+    
+    # Stop background worker
+    try:
+        if hasattr(app.state, "worker"):
+            worker = app.state.worker
+            worker.stop()
+            logger.info("Parsing worker stopped")
+        
+        if hasattr(app.state, "worker_task"):
+            worker_task = app.state.worker_task
+            # Give worker time to gracefully shut down
+            await asyncio.sleep(1)
+            if not worker_task.done():
+                worker_task.cancel()
+                try:
+                    await worker_task
+                except asyncio.CancelledError:
+                    pass
+    except Exception as e:
+        logger.warning(f"Error stopping worker: {e}")
+    
     await MongoDBClient.close()
 
 
