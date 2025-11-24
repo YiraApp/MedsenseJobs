@@ -78,12 +78,18 @@ def create_app() -> FastAPI:
     """
     settings = get_settings()
 
-    # Create FastAPI app with Google API metadata
+    docs_url = "/docs" if settings.debug else None
+    redoc_url = "/redoc" if settings.debug else None
+    openapi_url = f"{settings.api_prefix}/openapi.json" if settings.debug else None
+
     app = FastAPI(
         title=settings.app_name,
         description=settings.app_description,
         version=settings.app_version,
         lifespan=lifespan,
+        docs_url=docs_url,
+        redoc_url=redoc_url,
+        openapi_url=openapi_url,
     )
 
     # Add CORS middleware
@@ -136,9 +142,6 @@ def create_app() -> FastAPI:
             "service": settings.app_name,
             "version": settings.app_version,
             "status": "operational",
-            "docs": "/docs",
-            "health": "/api/v1/health",
-            "api": f"/api/{settings.api_version}",
         }
 
     # Include API v1 routes (health is inside /api/v1)
