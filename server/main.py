@@ -32,15 +32,17 @@ async def lifespan(app: FastAPI):
         logger.info("MongoDB connection established")
     except Exception as e:
         logger.warning(f"MongoDB connection warning: {e}")
+    
+    # Start background parsing worker (new implementation)
     try:
         worker = get_parsing_worker()
-        worker_task = asyncio.create_task(worker.start())
+        await worker.start()  # start is async and creates its own background task
         logger.info("Parsing worker started")
-        app.state.worker_task = worker_task
         app.state.worker = worker
     except Exception as e:
         logger.error(f"Failed to start parsing worker: {e}")
-
+    
+    # ---- yield to application runtime ----
     yield
     
     # Cleanup on shutdown
@@ -50,22 +52,14 @@ async def lifespan(app: FastAPI):
     try:
         if hasattr(app.state, "worker"):
             worker = app.state.worker
-            worker.stop()
-            logger.info("Parsing worker stopped")
-        
-        if hasattr(app.state, "worker_task"):
-            worker_task = app.state.worker_task
-            # Give worker time to gracefully shut down
+            worker.stop()  # non-blocking: signals the worker loop to stop
+            logger.info("Parsing worker stop signal sent")
+            # give the worker a short grace period to exit cleanly
             await asyncio.sleep(1)
-            if not worker_task.done():
-                worker_task.cancel()
-                try:
-                    await worker_task
-                except asyncio.CancelledError:
-                    pass
     except Exception as e:
         logger.warning(f"Error stopping worker: {e}")
     
+    # Close MongoDB
     await MongoDBClient.close()
 
 
@@ -78,6 +72,8 @@ def create_app() -> FastAPI:
     """
     settings = get_settings()
 
+    # Create FastAPI app with Google API metadata
+    # Disable OpenAPI/Swagger docs in production
     docs_url = "/docs" if settings.debug else None
     redoc_url = "/redoc" if settings.debug else None
     openapi_url = f"{settings.api_prefix}/openapi.json" if settings.debug else None
